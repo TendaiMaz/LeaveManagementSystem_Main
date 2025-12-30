@@ -338,6 +338,26 @@ INSERT INTO leave_types (name, description, max_days_per_year, requires_document
   ('Paternity Leave', 'Leave for fathers after childbirth', 14, true)
 ON CONFLICT (name) DO NOTHING;
 
+-- Create function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create triggers to automatically update updated_at
+CREATE TRIGGER update_profiles_updated_at
+  BEFORE UPDATE ON profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_leave_requests_updated_at
+  BEFORE UPDATE ON leave_requests
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
 -- Create indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_profiles_role ON profiles(role);
 CREATE INDEX IF NOT EXISTS idx_profiles_manager ON profiles(manager_id);

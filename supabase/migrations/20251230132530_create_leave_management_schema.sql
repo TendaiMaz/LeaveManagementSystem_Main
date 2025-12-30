@@ -8,8 +8,8 @@
   ## New Tables
 
   ### 1. profiles
-  Extends auth.users with additional user information and role management.
-  - `id` (uuid, primary key, references auth.users)
+  Stores user information and role management.
+  - `id` (uuid, primary key)
   - `email` (text, user email)
   - `full_name` (text, user's full name)
   - `role` (text, one of: employee, manager, hr, admin)
@@ -59,9 +59,44 @@
   - Admins have full access to all data
 */
 
+-- Create authenticated role for RLS policies
+-- Note: After creating this role, you should grant it to your application users:
+--   GRANT authenticated TO your_app_user;
+-- Or grant to PUBLIC if all database users should have authenticated access:
+--   GRANT authenticated TO PUBLIC;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated;
+  END IF;
+END
+$$;
+
+-- Create function to get current user ID (replaces auth.uid() from Supabase)
+-- This uses a session variable that should be set by your application
+-- 
+-- To use this function, set the session variable before executing queries:
+--   SET LOCAL app.current_user_id = 'user-uuid-here';
+-- Or use SET SESSION for the entire session:
+--   SET app.current_user_id = 'user-uuid-here';
+--
+-- In your application, you should set this variable after authentication
+-- and before executing any queries that need RLS policies.
+CREATE OR REPLACE FUNCTION current_user_id()
+RETURNS uuid AS $$
+BEGIN
+  -- Try to get user ID from session variable (set by application)
+  RETURN current_setting('app.current_user_id', true)::uuid;
+EXCEPTION
+  WHEN OTHERS THEN
+    -- If not set, return NULL (user not authenticated)
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 -- Create profiles table
 CREATE TABLE IF NOT EXISTS profiles (
-  id uuid PRIMARY KEY REFERENCES auth.users ON DELETE CASCADE,
+  id uuid PRIMARY KEY,
   email text UNIQUE NOT NULL,
   full_name text NOT NULL,
   role text NOT NULL CHECK (role IN ('employee', 'manager', 'hr', 'admin')),
@@ -120,7 +155,7 @@ ALTER TABLE leave_approvals ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users can view their own profile"
   ON profiles FOR SELECT
   TO authenticated
-  USING (auth.uid() = id);
+  USING (current_user_id() = id);
 
 CREATE POLICY "Managers can view their team members' profiles"
   ON profiles FOR SELECT
@@ -128,7 +163,7 @@ CREATE POLICY "Managers can view their team members' profiles"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role IN ('manager', 'hr', 'admin')
     )
   );
@@ -136,8 +171,8 @@ CREATE POLICY "Managers can view their team members' profiles"
 CREATE POLICY "Users can update their own profile"
   ON profiles FOR UPDATE
   TO authenticated
-  USING (auth.uid() = id)
-  WITH CHECK (auth.uid() = id);
+  USING (current_user_id() = id)
+  WITH CHECK (current_user_id() = id);
 
 CREATE POLICY "Admins can insert profiles"
   ON profiles FOR INSERT
@@ -145,7 +180,7 @@ CREATE POLICY "Admins can insert profiles"
   WITH CHECK (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   );
@@ -156,14 +191,14 @@ CREATE POLICY "Admins can update any profile"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   )
   WITH CHECK (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   );
@@ -174,7 +209,7 @@ CREATE POLICY "Admins can delete profiles"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   );
@@ -192,7 +227,7 @@ CREATE POLICY "Admins can manage leave types"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   );
@@ -202,7 +237,7 @@ CREATE POLICY "Admins can manage leave types"
 CREATE POLICY "Employees can view their own leave requests"
   ON leave_requests FOR SELECT
   TO authenticated
-  USING (employee_id = auth.uid());
+  USING (employee_id = current_user_id());
 
 CREATE POLICY "Managers can view their team members' leave requests"
   ON leave_requests FOR SELECT
@@ -211,7 +246,7 @@ CREATE POLICY "Managers can view their team members' leave requests"
     EXISTS (
       SELECT 1 FROM profiles p1
       JOIN profiles p2 ON p2.manager_id = p1.id
-      WHERE p1.id = auth.uid()
+      WHERE p1.id = current_user_id()
       AND p1.role = 'manager'
       AND p2.id = leave_requests.employee_id
     )
@@ -223,7 +258,7 @@ CREATE POLICY "HR can view all approved leave requests"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role IN ('hr', 'admin')
     )
   );
@@ -231,13 +266,13 @@ CREATE POLICY "HR can view all approved leave requests"
 CREATE POLICY "Employees can create their own leave requests"
   ON leave_requests FOR INSERT
   TO authenticated
-  WITH CHECK (employee_id = auth.uid());
+  WITH CHECK (employee_id = current_user_id());
 
 CREATE POLICY "Employees can update their own pending leave requests"
   ON leave_requests FOR UPDATE
   TO authenticated
-  USING (employee_id = auth.uid() AND status = 'pending')
-  WITH CHECK (employee_id = auth.uid());
+  USING (employee_id = current_user_id() AND status = 'pending')
+  WITH CHECK (employee_id = current_user_id());
 
 CREATE POLICY "Managers can update leave requests status for their team"
   ON leave_requests FOR UPDATE
@@ -246,7 +281,7 @@ CREATE POLICY "Managers can update leave requests status for their team"
     EXISTS (
       SELECT 1 FROM profiles p1
       JOIN profiles p2 ON p2.manager_id = p1.id
-      WHERE p1.id = auth.uid()
+      WHERE p1.id = current_user_id()
       AND p1.role = 'manager'
       AND p2.id = leave_requests.employee_id
     )
@@ -255,7 +290,7 @@ CREATE POLICY "Managers can update leave requests status for their team"
     EXISTS (
       SELECT 1 FROM profiles p1
       JOIN profiles p2 ON p2.manager_id = p1.id
-      WHERE p1.id = auth.uid()
+      WHERE p1.id = current_user_id()
       AND p1.role = 'manager'
       AND p2.id = leave_requests.employee_id
     )
@@ -267,14 +302,14 @@ CREATE POLICY "Admins can update any leave request"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   )
   WITH CHECK (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role = 'admin'
     )
   );
@@ -288,7 +323,7 @@ CREATE POLICY "Employees can view approvals for their leave requests"
     EXISTS (
       SELECT 1 FROM leave_requests
       WHERE leave_requests.id = leave_approvals.leave_request_id
-      AND leave_requests.employee_id = auth.uid()
+      AND leave_requests.employee_id = current_user_id()
     )
   );
 
@@ -300,7 +335,7 @@ CREATE POLICY "Managers can view approvals for their team's leave requests"
       SELECT 1 FROM leave_requests lr
       JOIN profiles p ON p.id = lr.employee_id
       WHERE lr.id = leave_approvals.leave_request_id
-      AND p.manager_id = auth.uid()
+      AND p.manager_id = current_user_id()
     )
   );
 
@@ -310,7 +345,7 @@ CREATE POLICY "HR and Admins can view all approvals"
   USING (
     EXISTS (
       SELECT 1 FROM profiles
-      WHERE profiles.id = auth.uid()
+      WHERE profiles.id = current_user_id()
       AND profiles.role IN ('hr', 'admin')
     )
   );
@@ -319,12 +354,12 @@ CREATE POLICY "Managers can create approvals for their team's leave requests"
   ON leave_approvals FOR INSERT
   TO authenticated
   WITH CHECK (
-    approver_id = auth.uid() AND
+    approver_id = current_user_id() AND
     EXISTS (
       SELECT 1 FROM leave_requests lr
       JOIN profiles p ON p.id = lr.employee_id
       WHERE lr.id = leave_request_id
-      AND p.manager_id = auth.uid()
+      AND p.manager_id = current_user_id()
     )
   );
 
